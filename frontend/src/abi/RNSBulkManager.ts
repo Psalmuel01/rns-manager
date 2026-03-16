@@ -1,6 +1,33 @@
 export const bulkManagerAbi = [
   {
     type: "function",
+    name: "multicall",
+    stateMutability: "payable",
+    inputs: [
+      {
+        name: "calls",
+        type: "tuple[]",
+        components: [
+          { name: "target", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "data", type: "bytes" }
+        ]
+      },
+      { name: "revertOnFail", type: "bool" }
+    ],
+    outputs: [
+      {
+        name: "",
+        type: "tuple[]",
+        components: [
+          { name: "success", type: "bool" },
+          { name: "returnData", type: "bytes" }
+        ]
+      }
+    ]
+  },
+  {
+    type: "function",
     name: "batchCommit",
     stateMutability: "nonpayable",
     inputs: [

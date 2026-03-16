@@ -18,5 +18,11 @@ export const rootstockTestnet = defineChain({
       name: "Rootstock Explorer",
       url: "https://explorer.testnet.rsk.co"
     }
+  },
+  contracts: {
+    multicall3: {
+      address: "0xcA11bde05977b3631167028862bE2a173976CA11",
+      blockCreated: 2771150
+    }
   }
 });

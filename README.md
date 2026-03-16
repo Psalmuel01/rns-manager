@@ -76,8 +76,12 @@ From Rootstock/RNS packages and docs:
 - The UI loads domain metadata using the registry + resolver + RSK Owner contracts.
 - The domain list is input-driven (paste labels). If you want auto-discovery, add an indexer or
   The Graph integration.
-- The bulk register panel assumes the RSK Registrar ABI: `register(label, owner, secret, duration, price)`.
-  Adjust `frontend/src/abi/registrar.ts` if your registrar differs.
+- The bulk register panel uses the RSK Registrar token-based flow (ERC-677 `transferAndCall`).
+  It encodes the registrar payload as `register(name, nameOwner, secret, duration)` and
+  sends RIF tokens to the registrar for payment. Adjust `frontend/src/abi/registrar.ts`
+  and `frontend/src/lib/rnsEncoding.ts` if your registrar differs.
+- Because the bulk manager is the caller in batch transactions, it must hold enough RIF to
+  cover the batch. Transfer RIF to the bulk manager address before registering/renewing.
 
 ## Tests
 

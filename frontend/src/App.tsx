@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Address, encodeFunctionData, isAddress, parseEther } from "viem";
+import { Address, encodeFunctionData, formatUnits, isAddress } from "viem";
 import {
   useAccount,
   useConnect,
@@ -7,13 +7,14 @@ import {
   usePublicClient,
   useWalletClient
 } from "wagmi";
-import { injected } from "wagmi/connectors";
 import { bulkManagerAbi } from "./abi/RNSBulkManager";
-import { rnsRegistryAbi } from "./abi/rns";
-import { fetchDomainInfo, DomainRow } from "./lib/rnsActions";
-import { normalizeLabel } from "./lib/namehash";
-import { RNS_ADDRESSES, BULK_MANAGER_ADDRESS } from "./lib/rnsConfig";
+import { rnsRegistryAbi, rskOwnerAbi } from "./abi/rns";
 import { rskRegistrarAbi, renewerAbi } from "./abi/registrar";
+import { rifTokenAbi } from "./abi/rif";
+import { fetchDomainsInfo, DomainRow } from "./lib/rnsActions";
+import { labelhash, normalizeLabel } from "./lib/namehash";
+import { encodeRegisterData, encodeRenewData } from "./lib/rnsEncoding";
+import { RNS_ADDRESSES, BULK_MANAGER_ADDRESS } from "./lib/rnsConfig";
 import { rootstockTestnet } from "./lib/chain";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
@@ -30,9 +31,15 @@ function randomSecret(): `0x${string}` {
     .join("")}`;
 }
 
+function formatWait(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.ceil(seconds / 60);
+  return `${seconds}s (~${minutes}m)`;
+}
+
 export default function App() {
-  const { address, isConnected } = useAccount();
-  const { connect } = useConnect();
+  const { address, isConnected, chainId: walletChainId } = useAccount();
+  const { connect, connectors } = useConnect();
   const { disconnect } = useDisconnect();
   const publicClient = usePublicClient();
   const { data: walletClient } = useWalletClient();
@@ -40,22 +47,71 @@ export default function App() {
   const [bulkAddress, setBulkAddress] = useState(BULK_MANAGER_ADDRESS);
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [importText, setImportText] = useState("");
-  const [status, setStatus] = useState<string | null>(null);
   const [newAddress, setNewAddress] = useState("");
   const [renewYears, setRenewYears] = useState("1");
-  const [renewValue, setRenewValue] = useState("0");
   const [commitLabels, setCommitLabels] = useState("");
   const [commitDuration, setCommitDuration] = useState("1");
   const [commitments, setCommitments] = useState<Record<string, `0x${string}`>>({});
   const [secrets, setSecrets] = useState<Record<string, `0x${string}`>>({});
   const [approved, setApproved] = useState(false);
+  const [rifBalance, setRifBalance] = useState<bigint | null>(null);
+  const [isLoadingDomains, setIsLoadingDomains] = useState(false);
+  const [minCommitmentAge, setMinCommitmentAge] = useState<number | null>(null);
+  const [toasts, setToasts] = useState<
+    { id: number; message: string; kind: "info" | "success" | "error" }[]
+  >([]);
 
   const bulkManagerAddress = useMemo(() => {
     if (bulkAddress && isAddress(bulkAddress)) return bulkAddress as Address;
     return undefined;
   }, [bulkAddress]);
+  const injectedConnector =
+    connectors.find((connector) => connector.id === "injected") ?? connectors[0];
+
+  function pushToast(message: string, kind: "info" | "success" | "error" = "info") {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setToasts((prev) => [...prev, { id, message, kind }]);
+    window.setTimeout(() => {
+      setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, 3500);
+  }
 
   const selected = domains.filter((domain) => domain.selected);
+  const secretsKey = useMemo(
+    () => (address ? `rns-bulk-secrets-${address.toLowerCase()}` : null),
+    [address]
+  );
+  const commitmentsKey = useMemo(
+    () => (address ? `rns-bulk-commitments-${address.toLowerCase()}` : null),
+    [address]
+  );
+
+  useEffect(() => {
+    if (!secretsKey || !commitmentsKey) {
+      setSecrets({});
+      setCommitments({});
+      return;
+    }
+    try {
+      const storedSecrets = localStorage.getItem(secretsKey);
+      const storedCommitments = localStorage.getItem(commitmentsKey);
+      setSecrets(storedSecrets ? JSON.parse(storedSecrets) : {});
+      setCommitments(storedCommitments ? JSON.parse(storedCommitments) : {});
+    } catch (error) {
+      setSecrets({});
+      setCommitments({});
+    }
+  }, [secretsKey, commitmentsKey]);
+
+  useEffect(() => {
+    if (!secretsKey) return;
+    localStorage.setItem(secretsKey, JSON.stringify(secrets));
+  }, [secretsKey, secrets]);
+
+  useEffect(() => {
+    if (!commitmentsKey) return;
+    localStorage.setItem(commitmentsKey, JSON.stringify(commitments));
+  }, [commitmentsKey, commitments]);
 
   useEffect(() => {
     async function checkApproval() {
@@ -72,6 +128,35 @@ export default function App() {
     checkApproval().catch(() => setApproved(false));
   }, [address, bulkManagerAddress, publicClient]);
 
+  useEffect(() => {
+    if (!publicClient || !bulkManagerAddress) {
+      setRifBalance(null);
+      return;
+    }
+
+    publicClient
+      .readContract({
+        address: RNS_ADDRESSES.rifToken as Address,
+        abi: rifTokenAbi,
+        functionName: "balanceOf",
+        args: [bulkManagerAddress]
+      })
+      .then((balance) => setRifBalance(balance as bigint))
+      .catch(() => setRifBalance(null));
+  }, [bulkManagerAddress, publicClient]);
+
+  useEffect(() => {
+    if (!publicClient) return;
+    publicClient
+      .readContract({
+        address: RNS_ADDRESSES.rskRegistrar as Address,
+        abi: rskRegistrarAbi,
+        functionName: "minCommitmentAge"
+      })
+      .then((age) => setMinCommitmentAge(Number(age)))
+      .catch(() => setMinCommitmentAge(null));
+  }, [publicClient]);
+
   async function handleImport() {
     if (!publicClient) return;
     const labels = importText
@@ -81,84 +166,132 @@ export default function App() {
 
     if (!labels.length) return;
 
-    setStatus("Loading domain data...");
+    setIsLoadingDomains(true);
+    pushToast("Loading domain data...");
     try {
-      const rows = await Promise.all(labels.map((label) => fetchDomainInfo(publicClient, label)));
+      const rows = await fetchDomainsInfo(publicClient, labels);
       setDomains(rows);
-      setStatus(null);
+      pushToast("Domains loaded.", "success");
     } catch (error) {
-      setStatus("Failed to fetch domain data.");
+      pushToast("Failed to fetch domain data.", "error");
+    } finally {
+      setIsLoadingDomains(false);
     }
   }
 
   async function handleApproval() {
-    if (!walletClient || !bulkManagerAddress) return;
-    setStatus("Submitting approval transaction...");
+    if (!isConnected) {
+      pushToast("Connect your wallet to approve the bulk manager.", "error");
+      return;
+    }
+    if (!bulkManagerAddress) {
+      pushToast("Enter a valid bulk manager address.", "error");
+      return;
+    }
+    if (walletChainId && walletChainId !== rootstockTestnet.id) {
+      pushToast("Wrong network. Switch to Rootstock Testnet (chain 31).", "error");
+      return;
+    }
+    if (!walletClient) {
+      pushToast("Wallet client not ready. Try reconnecting your wallet.", "error");
+      return;
+    }
+    pushToast("Submitting approval transaction...");
     try {
-      await walletClient.writeContract({
+      const hash = await walletClient.writeContract({
         address: RNS_ADDRESSES.registry as Address,
         abi: rnsRegistryAbi,
         functionName: "setApprovalForAll",
         args: [bulkManagerAddress, true]
       });
       setApproved(true);
-      setStatus("Bulk manager approved.");
+      pushToast(`Approval submitted: ${shorten(hash)}`, "success");
     } catch (error) {
-      setStatus("Approval failed.");
+      const message = error instanceof Error ? error.message : "Approval failed.";
+      pushToast(message, "error");
     }
   }
 
   async function handleSetAddr() {
     if (!walletClient || !bulkManagerAddress) return;
     if (!isAddress(newAddress)) {
-      setStatus("Enter a valid address.");
+      pushToast("Enter a valid address.", "error");
       return;
     }
 
     const nodes = selected.map((domain) => domain.node);
     const addrs = selected.map(() => newAddress as Address);
 
-    setStatus("Submitting batch setAddr transaction...");
+    pushToast("Submitting batch setAddr transaction...");
     try {
-      await walletClient.writeContract({
+      const hash = await walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
         functionName: "batchSetAddr",
         args: [nodes, addrs, true]
       });
-      setStatus("batchSetAddr submitted.");
+      pushToast(`batchSetAddr submitted: ${shorten(hash)}`, "success");
     } catch (error) {
-      setStatus("batchSetAddr failed.");
+      pushToast("batchSetAddr failed.", "error");
     }
   }
 
   async function handleRenew() {
-    if (!walletClient || !bulkManagerAddress) return;
+    if (!publicClient || !walletClient || !bulkManagerAddress) return;
     if (!selected.length) return;
 
-    const duration = BigInt(Number(renewYears) * 31_536_000);
-    const valuePerDomain = Number(renewValue || "0");
-    const values = selected.map(() => (valuePerDomain ? parseEther(valuePerDomain.toString()) : 0n));
-    const data = selected.map((domain) =>
-      encodeFunctionData({
-        abi: renewerAbi,
-        functionName: "renew",
-        args: [domain.label, duration]
-      })
-    );
+    const durationYears = BigInt(Number(renewYears));
+    if (durationYears <= 0n) {
+      pushToast("Enter a valid duration in years.", "error");
+      return;
+    }
 
-    setStatus("Submitting batch renew transaction...");
+    const calls: { target: Address; value: bigint; data: `0x${string}` }[] = [];
+
+    for (const domain of selected) {
+      const expires =
+        domain.expiresAt ??
+        Number(
+          await publicClient.readContract({
+            address: RNS_ADDRESSES.rskOwner as Address,
+            abi: rskOwnerAbi,
+            functionName: "expirationTime",
+            args: [BigInt(labelhash(domain.label))]
+          })
+        );
+
+      const price = await publicClient.readContract({
+        address: RNS_ADDRESSES.renewer as Address,
+        abi: renewerAbi,
+        functionName: "price",
+        args: [domain.label, BigInt(expires), durationYears]
+      });
+
+      const renewData = encodeRenewData(domain.label, durationYears);
+      const transferData = encodeFunctionData({
+        abi: rifTokenAbi,
+        functionName: "transferAndCall",
+        args: [RNS_ADDRESSES.renewer as Address, price, renewData]
+      });
+
+      calls.push({
+        target: RNS_ADDRESSES.rifToken as Address,
+        value: 0n,
+        data: transferData
+      });
+    }
+
+    pushToast("Submitting batch renew transaction (RIF transferAndCall)...");
     try {
-      await walletClient.writeContract({
+      const hash = await walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
-        functionName: "batchRenew",
-        args: [data, values, false],
-        value: values.reduce((sum, val) => sum + val, 0n)
+        functionName: "multicall",
+        args: [calls, false]
       });
-      setStatus("batchRenew submitted.");
+      pushToast(`batchRenew submitted: ${shorten(hash)}`, "success");
     } catch (error) {
-      setStatus("batchRenew failed.");
+      pushToast("batchRenew failed.", "error");
     }
   }
 
@@ -172,7 +305,7 @@ export default function App() {
 
     if (!labels.length) return;
 
-    setStatus("Computing commitments...");
+    pushToast("Computing commitments...");
 
     const nextSecrets: Record<string, `0x${string}`> = { ...secrets };
     const commitmentsArray: `0x${string}`[] = [];
@@ -185,7 +318,7 @@ export default function App() {
         address: RNS_ADDRESSES.rskRegistrar as Address,
         abi: rskRegistrarAbi,
         functionName: "makeCommitment",
-        args: [label, address ?? ZERO_ADDRESS, secret]
+        args: [labelhash(label), address ?? ZERO_ADDRESS, secret]
       });
 
       commitmentsArray.push(commitment);
@@ -200,17 +333,21 @@ export default function App() {
       }, {} as Record<string, `0x${string}`>)
     }));
 
-    setStatus("Submitting bulk commit transaction...");
+    pushToast("Submitting bulk commit transaction...");
     try {
-      await walletClient.writeContract({
+      const hash = await walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
         functionName: "batchCommit",
         args: [commitmentsArray, false]
       });
-      setStatus("bulkCommit submitted. Wait minCommitmentAge before registering.");
+      const waitText =
+        minCommitmentAge !== null
+          ? `Wait at least ${formatWait(minCommitmentAge)} before registering.`
+          : "Wait minCommitmentAge before registering.";
+      pushToast(`bulkCommit submitted: ${shorten(hash)}. ${waitText}`, "success");
     } catch (error) {
-      setStatus("bulkCommit failed.");
+      pushToast("bulkCommit failed.", "error");
     }
   }
 
@@ -224,48 +361,67 @@ export default function App() {
 
     if (!labels.length) return;
 
-    const duration = BigInt(Number(commitDuration) * 31_536_000);
+    const durationYears = BigInt(Number(commitDuration));
+    if (durationYears <= 0n) {
+      pushToast("Enter a valid duration in years.", "error");
+      return;
+    }
 
-    setStatus("Preparing register calls...");
-    const data: `0x${string}`[] = [];
-    const values: bigint[] = [];
+    pushToast("Preparing register calls...");
+    const calls: { target: Address; value: bigint; data: `0x${string}` }[] = [];
 
     for (const label of labels) {
       const secret = secrets[label];
       if (!secret) {
-        setStatus(`Missing secret for ${label}. Commit first.`);
+        pushToast(`Missing secret for ${label}. Commit first.`, "error");
         return;
       }
+
+      const expires = await publicClient.readContract({
+        address: RNS_ADDRESSES.rskOwner as Address,
+        abi: rskOwnerAbi,
+        functionName: "expirationTime",
+        args: [BigInt(labelhash(label))]
+      });
 
       const price = await publicClient.readContract({
         address: RNS_ADDRESSES.rskRegistrar as Address,
         abi: rskRegistrarAbi,
         functionName: "price",
-        args: [label, duration]
+        args: [label, expires, durationYears]
       });
 
-      data.push(
-        encodeFunctionData({
-          abi: rskRegistrarAbi,
-          functionName: "register",
-          args: [label, address ?? ZERO_ADDRESS, secret, duration, price]
-        })
+      const registerData = encodeRegisterData(
+        label,
+        (address ?? ZERO_ADDRESS) as `0x${string}`,
+        secret,
+        durationYears
       );
 
-      values.push(0n);
+      const transferData = encodeFunctionData({
+        abi: rifTokenAbi,
+        functionName: "transferAndCall",
+        args: [RNS_ADDRESSES.rskRegistrar as Address, price, registerData]
+      });
+
+      calls.push({
+        target: RNS_ADDRESSES.rifToken as Address,
+        value: 0n,
+        data: transferData
+      });
     }
 
-    setStatus("Submitting bulk register transaction...");
+    pushToast("Submitting bulk register transaction (RIF transferAndCall)...");
     try {
-      await walletClient.writeContract({
+      const hash = await walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
-        functionName: "batchRegister",
-        args: [data, values, false]
+        functionName: "multicall",
+        args: [calls, false]
       });
-      setStatus("bulkRegister submitted.");
+      pushToast(`bulkRegister submitted: ${shorten(hash)}`, "success");
     } catch (error) {
-      setStatus("bulkRegister failed.");
+      pushToast("bulkRegister failed.", "error");
     }
   }
 
@@ -312,7 +468,7 @@ export default function App() {
               ) : (
                 <button
                   className="rounded-full bg-sun px-6 py-2 text-sm font-semibold text-ink shadow-glow"
-                  onClick={() => connect({ connector: injected() })}
+                  onClick={() => injectedConnector && connect({ connector: injectedConnector })}
                 >
                   Connect Wallet
                 </button>
@@ -330,20 +486,44 @@ export default function App() {
                 onChange={(event) => setBulkAddress(event.target.value)}
                 placeholder="0x..."
                 className="mt-2 w-full rounded-2xl border border-white/10 bg-ink/60 px-4 py-3 text-sm text-white"
+                disabled
               />
             </div>
             <button
               className="h-[52px] self-end rounded-2xl border border-white/20 px-5 text-sm text-white hover:border-sun hover:text-sun"
               onClick={handleApproval}
-              disabled={!isConnected || !bulkManagerAddress}
+              disabled={
+                !isConnected ||
+                !bulkManagerAddress ||
+                !walletClient ||
+                (walletChainId !== undefined && walletChainId !== rootstockTestnet.id)
+              }
             >
               {approved ? "Bulk Manager Approved" : "Approve Bulk Manager"}
             </button>
           </div>
+          {!isConnected && (
+            <p className="mt-2 text-xs text-steel">Connect your wallet to approve the bulk manager.</p>
+          )}
+          {isConnected && !bulkManagerAddress && (
+            <p className="mt-2 text-xs text-steel">Enter a valid bulk manager address.</p>
+          )}
+          {isConnected && bulkManagerAddress && walletChainId !== undefined && walletChainId !== rootstockTestnet.id && (
+            <p className="mt-2 text-xs text-steel">Switch to Rootstock Testnet (chain 31).</p>
+          )}
+          {isConnected && bulkManagerAddress && !walletClient && (
+            <p className="mt-2 text-xs text-steel">Wallet client not ready. Try reconnecting.</p>
+          )}
           <p className="mt-3 text-xs text-steel">
             Approval grants this contract operator rights in the RNS registry so it can update
             resolver records on your behalf.
           </p>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-ink/60 px-4 py-3 text-xs text-steel">
+            <span>Bulk Manager RIF balance</span>
+            <span className="text-white">
+              {rifBalance !== null ? `${formatUnits(rifBalance, 18)} RIF` : "—"}
+            </span>
+          </div>
         </section>
 
         <section className="rounded-3xl border border-white/10 bg-white/5 p-8 shadow-card backdrop-blur">
@@ -366,9 +546,9 @@ export default function App() {
                 <button
                   className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-ink"
                   onClick={handleImport}
-                  disabled={!publicClient}
+                  disabled={!publicClient || isLoadingDomains}
                 >
-                  Load Domains
+                  {isLoadingDomains ? "Loading..." : "Load Domains"}
                 </button>
                 <button
                   className="rounded-2xl border border-white/20 px-4 py-2 text-sm text-white"
@@ -403,7 +583,7 @@ export default function App() {
                   <th className="pb-3">Domain</th>
                   <th className="pb-3">Resolver Addr</th>
                   <th className="pb-3">Expiry</th>
-                  <th className="pb-3">Node</th>
+                  <th className="pb-3">Namehash</th>
                 </tr>
               </thead>
               <tbody className="text-white">
@@ -419,14 +599,38 @@ export default function App() {
                     </td>
                     <td className="py-4 font-semibold">{domain.name}</td>
                     <td className="py-4 text-steel">
-                      {domain.address && domain.address !== ZERO_ADDRESS
-                        ? shorten(domain.address)
-                        : "—"}
+                      {domain.address && domain.address !== ZERO_ADDRESS ? (
+                        <button
+                          type="button"
+                          className="rounded-full border border-white/10 px-3 py-1 text-xs text-steel hover:border-sun hover:text-sun"
+                          onClick={() => {
+                            navigator.clipboard.writeText(domain.address ?? "");
+                            pushToast("Address copied.", "success");
+                          }}
+                          title="Copy address"
+                        >
+                          {shorten(domain.address)}
+                        </button>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="py-4 text-steel">
                       {domain.expiresAt ? new Date(domain.expiresAt * 1000).toLocaleDateString() : "—"}
                     </td>
-                    <td className="py-4 text-xs text-steel">{shorten(domain.node)}</td>
+                    <td className="py-4 text-xs text-steel">
+                      <button
+                        type="button"
+                        className="rounded-full border border-white/10 px-3 py-1 text-xs text-steel hover:border-sun hover:text-sun"
+                        onClick={() => {
+                          navigator.clipboard.writeText(domain.node);
+                          pushToast("Namehash copied.", "success");
+                        }}
+                        title="Copy namehash"
+                      >
+                        {shorten(domain.node)}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -441,7 +645,7 @@ export default function App() {
 
             <div className="mt-6 space-y-6">
               <div>
-                <label className="text-xs uppercase tracking-wider text-steel">Set Resolver Address</label>
+                <label className="text-xs uppercase tracking-wider text-steel">Set Address Record</label>
                 <div className="mt-2 flex flex-wrap gap-3">
                   <input
                     value={newAddress}
@@ -457,6 +661,9 @@ export default function App() {
                     Set Address
                   </button>
                 </div>
+                <p className="mt-2 text-xs text-steel">
+                  Writes the resolver address record for each selected name (requires registry approval).
+                </p>
               </div>
 
               <div>
@@ -468,12 +675,6 @@ export default function App() {
                     className="w-24 rounded-2xl border border-white/10 bg-ink/60 px-3 py-3 text-sm text-white"
                     placeholder="Years"
                   />
-                  <input
-                    value={renewValue}
-                    onChange={(event) => setRenewValue(event.target.value)}
-                    className="w-32 rounded-2xl border border-white/10 bg-ink/60 px-3 py-3 text-sm text-white"
-                    placeholder="RBTC value"
-                  />
                   <button
                     className="rounded-2xl border border-white/20 px-5 py-3 text-sm text-white"
                     onClick={handleRenew}
@@ -483,7 +684,7 @@ export default function App() {
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-steel">
-                  If renewals are priced in RIF, make sure the bulk manager is funded and approved.
+                  Renewals are priced in RIF. Fund the bulk manager with RIF before renewing.
                 </p>
               </div>
             </div>
@@ -492,7 +693,7 @@ export default function App() {
           <div className="rounded-3xl border border-white/10 bg-white/5 p-8 shadow-card backdrop-blur">
             <h2 className="font-display text-2xl text-white">Bulk Register</h2>
             <p className="text-sm text-steel">
-              Commit and register labels in a two-step flow. Secrets are stored locally in memory.
+              Commit and register labels in a two-step flow. Secrets are stored in your browser.
             </p>
 
             <textarea
@@ -503,6 +704,9 @@ export default function App() {
             />
             <p className="mt-2 text-xs text-steel">
               Commit/register uses labels only (no .rsk). Each label gets its own secret.
+            </p>
+            <p className="mt-2 text-xs text-steel">
+              Registrations are paid in RIF. Fund the bulk manager address before registering.
             </p>
             <div className="mt-3 flex flex-wrap gap-3">
               <input
@@ -526,16 +730,34 @@ export default function App() {
                 Bulk Register
               </button>
             </div>
+            {minCommitmentAge !== null && (
+              <p className="mt-2 text-xs text-steel">
+                Minimum wait after commit: {formatWait(minCommitmentAge)}.
+              </p>
+            )}
             <p className="mt-3 text-xs text-steel">
-              Register uses the RSKRegistrar ABI: `register(label, owner, secret, duration, price)`.
-              Adjust the ABI if your registrar differs.
+              Duration is in years. Registration uses the RSK Registrar token flow:
+              `register(name, nameOwner, secret, duration)` encoded into a RIF `transferAndCall`.
             </p>
           </div>
         </section>
 
-        {status && (
-          <div className="rounded-2xl border border-white/10 bg-white/10 px-6 py-3 text-sm text-white">
-            {status}
+        {toasts.length > 0 && (
+          <div className="fixed bottom-6 right-6 z-50 space-y-3">
+            {toasts.map((toast) => (
+              <div
+                key={toast.id}
+                className={`rounded-2xl border px-4 py-3 text-xs shadow-card backdrop-blur ${
+                  toast.kind === "success"
+                    ? "border-mint/40 bg-mint/10 text-mint"
+                    : toast.kind === "error"
+                      ? "border-danger/40 bg-danger/10 text-danger"
+                      : "border-white/10 bg-white/10 text-white"
+                }`}
+              >
+                {toast.message}
+              </div>
+            ))}
           </div>
         )}
 
