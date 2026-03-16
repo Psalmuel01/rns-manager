@@ -27,3 +27,5 @@ export function withEnvOverrides(chainId: number): RnsAddressConfig {
     renewer: process.env.RNS_RENEWER || defaults.renewer
   };
 }
+
+console.log("RNS Addresses:", withEnvOverrides(31));

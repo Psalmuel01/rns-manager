@@ -280,19 +280,14 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen px-6 py-12 text-clay">
+    <div className="min-h-screen px-6 py-10 text-clay">
       <div className="mx-auto max-w-6xl space-y-10">
-        <header className="space-y-4">
-          <div className="inline-flex items-center gap-3 rounded-full border border-sun/40 bg-sun/10 px-4 py-1 text-sm uppercase tracking-[0.2em] text-sun">
-            RNS Bulk Manager
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-4">
+          <div>
+            <div className="font-display text-2xl text-white">RNS Bulk Manager</div>
+            <div className="text-sm text-steel">Bulk tools for Rootstock Name Service</div>
           </div>
-          <h1 className="font-display text-4xl text-white md:text-5xl">
-            Power-user controls for Rootstock Name Service domains
-          </h1>
-          <p className="max-w-2xl text-lg text-steel">
-            Batch commit, register, renew, and update resolver records across many RNS domains in a
-            single transaction. Designed for portfolio managers, infra teams, and domain power users.
-          </p>
+          <div className="text-xs text-steel">Rootstock Testnet</div>
         </header>
 
         <section className="rounded-3xl border border-white/10 bg-white/5 p-8 shadow-card backdrop-blur">
@@ -364,6 +359,9 @@ export default function App() {
                 placeholder="mywallet\nteam\nrouter"
                 className="mt-4 h-28 w-full rounded-2xl border border-white/10 bg-ink/60 p-4 text-sm text-white"
               />
+              <p className="mt-2 text-xs text-steel">
+                Enter labels only (no .rsk). One per line or comma-separated.
+              </p>
               <div className="mt-3 flex items-center gap-3">
                 <button
                   className="rounded-2xl bg-white px-4 py-2 text-sm font-semibold text-ink"
@@ -503,6 +501,9 @@ export default function App() {
               placeholder="alpha\nbeta\ngamma"
               className="mt-4 h-24 w-full rounded-2xl border border-white/10 bg-ink/60 p-4 text-sm text-white"
             />
+            <p className="mt-2 text-xs text-steel">
+              Commit/register uses labels only (no .rsk). Each label gets its own secret.
+            </p>
             <div className="mt-3 flex flex-wrap gap-3">
               <input
                 value={commitDuration}
@@ -538,8 +539,8 @@ export default function App() {
           </div>
         )}
 
-        <footer className="text-xs text-steel">
-          Network: Rootstock Testnet · Chain ID 31 · RPC {rootstockTestnet.rpcUrls.default.http[0]}
+        <footer className="border-t border-white/10 pt-4 text-xs text-steel">
+          RNS Bulk Manager · Chain ID 31 · RPC {rootstockTestnet.rpcUrls.default.http[0]}
         </footer>
       </div>
     </div>

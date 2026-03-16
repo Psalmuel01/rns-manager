@@ -59,7 +59,7 @@ describe("RNSBulkManager", function () {
     const registerBob = registrar.interface.encodeFunctionData("register", ["bob", registrar.target, ONE_YEAR]);
     const value = 1n * ONE_YEAR;
 
-    const results = await bulkManager.callStatic.batchRegister(
+    const results = await bulkManager.batchRegister.staticCall(
       [registerAlice, registerBob],
       [value, 0n],
       false,
@@ -84,12 +84,12 @@ describe("RNSBulkManager", function () {
     const aliceNode = labelToNode("alice");
     const targetAddress = "0x000000000000000000000000000000000000dEaD";
 
-    const failedResults = await bulkManager.callStatic.batchSetAddr([aliceNode], [targetAddress], false);
+    const failedResults = await bulkManager.batchSetAddr.staticCall([aliceNode], [targetAddress], false);
     expect(failedResults[0].success).to.equal(false);
 
     await registry.connect(user).setApprovalForAll(await bulkManager.getAddress(), true);
 
-    const successResults = await bulkManager.callStatic.batchSetAddr([aliceNode], [targetAddress], true);
+    const successResults = await bulkManager.batchSetAddr.staticCall([aliceNode], [targetAddress], true);
     expect(successResults[0].success).to.equal(true);
 
     await bulkManager.batchSetAddr([aliceNode], [targetAddress], true);
