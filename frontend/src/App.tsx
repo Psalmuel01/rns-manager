@@ -655,7 +655,7 @@ export default function App() {
               <textarea
                 value={importText}
                 onChange={(event) => setImportText(event.target.value)}
-                placeholder="mywallet\nteam\nrouter"
+                placeholder="label"
                 className="mt-4 h-28 w-full rounded-2xl border border-white/10 bg-ink/60 p-4 text-sm text-white"
               />
               <p className="mt-2 text-xs text-steel">
@@ -817,7 +817,7 @@ export default function App() {
             <textarea
               value={commitLabels}
               onChange={(event) => setCommitLabels(event.target.value)}
-              placeholder="alpha\nbeta\ngamma"
+              placeholder="label"
               className="mt-4 h-24 w-full rounded-2xl border border-white/10 bg-ink/60 p-4 text-sm text-white"
             />
             <p className="mt-2 text-xs text-steel">
