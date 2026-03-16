@@ -48,7 +48,6 @@ export default function App() {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [importText, setImportText] = useState("");
   const [newAddress, setNewAddress] = useState("");
-  const [resolverAddress, setResolverAddress] = useState(RNS_ADDRESSES.resolver);
   const [renewYears, setRenewYears] = useState("1");
   const [commitLabels, setCommitLabels] = useState("");
   const [commitDuration, setCommitDuration] = useState("1");
@@ -59,6 +58,13 @@ export default function App() {
   const [isLoadingDomains, setIsLoadingDomains] = useState(false);
   const [minCommitmentAge, setMinCommitmentAge] = useState<number | null>(null);
   const [supportsRegistryApproval, setSupportsRegistryApproval] = useState<boolean | null>(null);
+  const [commitWaitEndsAt, setCommitWaitEndsAt] = useState<number | null>(null);
+  const [nowSeconds, setNowSeconds] = useState<number>(Math.floor(Date.now() / 1000));
+  const [isApproving, setIsApproving] = useState(false);
+  const [isSettingAddr, setIsSettingAddr] = useState(false);
+  const [isRenewing, setIsRenewing] = useState(false);
+  const [isCommitting, setIsCommitting] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
   const [toasts, setToasts] = useState<
     { id: number; message: string; kind: "info" | "success" | "error" }[]
   >([]);
@@ -81,12 +87,14 @@ export default function App() {
   async function submitTx(
     label: string,
     action: () => Promise<`0x${string}`>,
-    onSuccess?: () => void
+    onSuccess?: () => void,
+    setLoading?: (value: boolean) => void
   ) {
     if (!publicClient) {
       pushToast("Public client not ready.", "error");
       return false;
     }
+    setLoading?.(true);
     pushToast(`Submitting ${label}...`);
     try {
       const hash = await action();
@@ -97,9 +105,9 @@ export default function App() {
       console.log(`[${label}] receipt`, receipt);
 
       if (receipt.status === "success") {
-      pushToast(`${label} confirmed.`, "success");
-      onSuccess?.();
-      return true;
+        pushToast(`${label} confirmed.`, "success");
+        onSuccess?.();
+        return true;
       }
       pushToast(`${label} failed.`, "error");
       return false;
@@ -107,6 +115,8 @@ export default function App() {
       console.error(`[${label}] error`, error);
       pushToast(`${label} failed.`, "error");
       return false;
+    } finally {
+      setLoading?.(false);
     }
   }
 
@@ -213,6 +223,14 @@ export default function App() {
       .catch(() => setMinCommitmentAge(null));
   }, [publicClient]);
 
+  useEffect(() => {
+    if (!commitWaitEndsAt) return;
+    const interval = window.setInterval(() => {
+      setNowSeconds(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [commitWaitEndsAt]);
+
   async function handleImport() {
     if (!publicClient) return;
     const labels = importText
@@ -265,7 +283,8 @@ export default function App() {
           functionName: "setApprovalForAll",
           args: [bulkManagerAddress, true]
         }),
-      () => setApproved(true)
+      () => setApproved(true),
+      setIsApproving
     );
   }
 
@@ -303,46 +322,21 @@ export default function App() {
     }
 
     if (!resolver || resolver === ZERO_ADDRESS) {
-      pushToast("Resolver is not set for this name. Set resolver first.", "error");
+      pushToast("Resolver is not set for this name.", "error");
       return;
     }
 
-    await submitTx("Set Address", () =>
-      walletClient.writeContract({
-        address: resolver as Address,
-        abi: rnsResolverAbi,
-        functionName: "setAddr",
-        args: [domain.node, newAddress as Address]
-      }),
-      () => refreshDomains()
-    );
-  }
-
-  async function handleSetResolver() {
-    if (!walletClient) {
-      pushToast("Wallet client not ready.", "error");
-      return;
-    }
-    if (!isAddress(resolverAddress)) {
-      pushToast("Enter a valid resolver address.", "error");
-      return;
-    }
-    if (selected.length !== 1) {
-      pushToast("Select exactly one name to set a resolver.", "error");
-      return;
-    }
-
-    const node = selected[0].node;
     await submitTx(
-      "Set Resolver",
+      "Set Address",
       () =>
         walletClient.writeContract({
-          address: RNS_ADDRESSES.registry as Address,
-          abi: rnsRegistryAbi,
-          functionName: "setResolver",
-          args: [node, resolverAddress as Address]
+          address: resolver as Address,
+          abi: rnsResolverAbi,
+          functionName: "setAddr",
+          args: [domain.node, newAddress as Address]
         }),
-      () => refreshDomains()
+      () => refreshDomains(),
+      setIsSettingAddr
     );
   }
 
@@ -391,13 +385,17 @@ export default function App() {
       });
     }
 
-    await submitTx("Renew", () =>
-      walletClient.writeContract({
-        address: bulkManagerAddress,
-        abi: bulkManagerAbi,
-        functionName: "multicall",
-        args: [calls, false]
-      })
+    await submitTx(
+      "Renew",
+      () =>
+        walletClient.writeContract({
+          address: bulkManagerAddress,
+          abi: bulkManagerAbi,
+          functionName: "multicall",
+          args: [calls, false]
+        }),
+      undefined,
+      setIsRenewing
     );
   }
 
@@ -439,20 +437,24 @@ export default function App() {
       }, {} as Record<string, `0x${string}`>)
     }));
 
-    await submitTx("Bulk Commit", () =>
-      walletClient.writeContract({
-        address: bulkManagerAddress,
-        abi: bulkManagerAbi,
-        functionName: "batchCommit",
-        args: [commitmentsArray, false]
-      }),
+    await submitTx(
+      "Bulk Commit",
+      () =>
+        walletClient.writeContract({
+          address: bulkManagerAddress,
+          abi: bulkManagerAbi,
+          functionName: "batchCommit",
+          args: [commitmentsArray, false]
+        }),
       () => {
-        const waitText =
-          minCommitmentAge !== null
-            ? `Wait at least ${formatWait(minCommitmentAge)} before registering.`
-            : "Wait minCommitmentAge before registering.";
-        pushToast(waitText, "info");
-      }
+        if (minCommitmentAge !== null) {
+          setCommitWaitEndsAt(Math.floor(Date.now() / 1000) + minCommitmentAge);
+          pushToast(`Wait at least ${formatWait(minCommitmentAge)} before registering.`, "info");
+        } else {
+          pushToast("Wait minCommitmentAge before registering.", "info");
+        }
+      },
+      setIsCommitting
     );
   }
 
@@ -516,13 +518,17 @@ export default function App() {
       });
     }
 
-    await submitTx("Bulk Register", () =>
-      walletClient.writeContract({
-        address: bulkManagerAddress,
-        abi: bulkManagerAbi,
-        functionName: "multicall",
-        args: [calls, false]
-      })
+    await submitTx(
+      "Bulk Register",
+      () =>
+        walletClient.writeContract({
+          address: bulkManagerAddress,
+          abi: bulkManagerAbi,
+          functionName: "multicall",
+          args: [calls, false]
+        }),
+      undefined,
+      setIsRegistering
     );
   }
 
@@ -598,10 +604,11 @@ export default function App() {
                   !isConnected ||
                   !bulkManagerAddress ||
                   !walletClient ||
+                  isApproving ||
                   (walletChainId !== undefined && walletChainId !== rootstockTestnet.id)
                 }
               >
-                {approved ? "Bulk Manager Approved" : "Approve Bulk Manager"}
+                {isApproving ? "Approving..." : approved ? "Bulk Manager Approved" : "Approve Bulk Manager"}
               </button>
             ) : (
               <div className="self-end text-xs text-steel">
@@ -681,7 +688,6 @@ export default function App() {
               <div className="mt-2 text-3xl font-display text-sun">{selected.length}</div>
               <div className="mt-6 space-y-2 text-xs">
                 <div>Registry: {shorten(RNS_ADDRESSES.registry)}</div>
-                <div>Resolver: {shorten(RNS_ADDRESSES.resolver)}</div>
                 <div>RSK Owner: {shorten(RNS_ADDRESSES.rskOwner)}</div>
               </div>
             </div>
@@ -693,7 +699,6 @@ export default function App() {
                 <tr>
                   <th className="pb-3">Select</th>
                   <th className="pb-3">Domain</th>
-                  <th className="pb-3">Resolver</th>
                   <th className="pb-3">Resolved Addr</th>
                   <th className="pb-3">Expiry</th>
                   <th className="pb-3">Namehash</th>
@@ -711,23 +716,6 @@ export default function App() {
                       />
                     </td>
                     <td className="py-4 font-semibold">{domain.name}</td>
-                    <td className="py-4 text-steel">
-                      {domain.resolver && domain.resolver !== ZERO_ADDRESS ? (
-                        <button
-                          type="button"
-                          className="rounded-full border border-white/10 px-3 py-1 text-xs text-steel hover:border-sun hover:text-sun"
-                          onClick={() => {
-                            navigator.clipboard.writeText(domain.resolver ?? "");
-                            pushToast("Resolver copied.", "success");
-                          }}
-                          title="Copy resolver address"
-                        >
-                          {shorten(domain.resolver)}
-                        </button>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
                     <td className="py-4 text-steel">
                       {domain.address && domain.address !== ZERO_ADDRESS ? (
                         <button
@@ -773,28 +761,7 @@ export default function App() {
             <h2 className="font-display text-2xl text-white">Bulk Actions</h2>
             <p className="text-sm text-steel">Operate on the selected domains.</p>
 
-            <div className="mt-6 space-y-6">
-              <div>
-                <label className="text-xs uppercase tracking-wider text-steel">Set Resolver</label>
-                <div className="mt-2 flex flex-wrap gap-3">
-                  <input
-                    value={resolverAddress}
-                    onChange={(event) => setResolverAddress(event.target.value)}
-                    placeholder={RNS_ADDRESSES.resolver}
-                    className="flex-1 rounded-2xl border border-white/10 bg-ink/60 px-4 py-3 text-sm text-white"
-                  />
-                  <button
-                    className="rounded-2xl border border-white/20 px-5 py-3 text-sm text-white"
-                    onClick={handleSetResolver}
-                    disabled={!walletClient || selected.length !== 1}
-                  >
-                    Set Resolver
-                  </button>
-                </div>
-                <p className="mt-2 text-xs text-steel">
-                  Sets the resolver contract for the selected name. The default resolver is prefilled.
-                </p>
-              </div>
+              <div className="mt-6 space-y-6">
               <div>
                 <label className="text-xs uppercase tracking-wider text-steel">Set Address Record</label>
                 <div className="mt-2 flex flex-wrap gap-3">
@@ -807,9 +774,9 @@ export default function App() {
                   <button
                     className="rounded-2xl bg-sun px-5 py-3 text-sm font-semibold text-ink"
                     onClick={handleSetAddr}
-                    disabled={!walletClient || selected.length !== 1}
+                    disabled={!walletClient || selected.length !== 1 || isSettingAddr}
                   >
-                    Set Address
+                    {isSettingAddr ? "Setting..." : "Set Address"}
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-steel">
@@ -829,9 +796,9 @@ export default function App() {
                   <button
                     className="rounded-2xl border border-white/20 px-5 py-3 text-sm text-white"
                     onClick={handleRenew}
-                    disabled={!selected.length || !bulkManagerAddress}
+                    disabled={!selected.length || !bulkManagerAddress || isRenewing}
                   >
-                    Renew Selected
+                    {isRenewing ? "Renewing..." : "Renew Selected"}
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-steel">
@@ -869,21 +836,23 @@ export default function App() {
               <button
                 className="rounded-2xl border border-white/20 px-4 py-3 text-sm text-white"
                 onClick={handleCommit}
-                disabled={!isConnected || !bulkManagerAddress}
+                disabled={!isConnected || !bulkManagerAddress || isCommitting}
               >
-                Bulk Commit
+                {isCommitting ? "Committing..." : "Bulk Commit"}
               </button>
               <button
                 className="rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-ink"
                 onClick={handleRegister}
-                disabled={!isConnected || !bulkManagerAddress}
+                disabled={!isConnected || !bulkManagerAddress || isRegistering}
               >
-                Bulk Register
+                {isRegistering ? "Registering..." : "Bulk Register"}
               </button>
             </div>
             {minCommitmentAge !== null && (
               <p className="mt-2 text-xs text-steel">
-                Minimum wait after commit: {formatWait(minCommitmentAge)}.
+                {commitWaitEndsAt && commitWaitEndsAt > nowSeconds
+                  ? `Minimum wait after commit: ${commitWaitEndsAt - nowSeconds}s remaining.`
+                  : `Minimum wait after commit: ${formatWait(minCommitmentAge)}.`}
               </p>
             )}
             <p className="mt-3 text-xs text-steel">
