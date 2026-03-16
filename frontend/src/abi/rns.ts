@@ -1,6 +1,16 @@
 export const rnsRegistryAbi = [
   {
     type: "function",
+    name: "setResolver",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "node", type: "bytes32" },
+      { name: "resolver", type: "address" }
+    ],
+    outputs: []
+  },
+  {
+    type: "function",
     name: "setApprovalForAll",
     stateMutability: "nonpayable",
     inputs: [

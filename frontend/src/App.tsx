@@ -8,7 +8,7 @@ import {
   useWalletClient
 } from "wagmi";
 import { bulkManagerAbi } from "./abi/RNSBulkManager";
-import { rnsRegistryAbi, rskOwnerAbi } from "./abi/rns";
+import { rnsRegistryAbi, rskOwnerAbi, rnsResolverAbi } from "./abi/rns";
 import { rskRegistrarAbi, renewerAbi } from "./abi/registrar";
 import { rifTokenAbi } from "./abi/rif";
 import { fetchDomainsInfo, DomainRow } from "./lib/rnsActions";
@@ -48,6 +48,7 @@ export default function App() {
   const [domains, setDomains] = useState<DomainRow[]>([]);
   const [importText, setImportText] = useState("");
   const [newAddress, setNewAddress] = useState("");
+  const [resolverAddress, setResolverAddress] = useState(RNS_ADDRESSES.resolver);
   const [renewYears, setRenewYears] = useState("1");
   const [commitLabels, setCommitLabels] = useState("");
   const [commitDuration, setCommitDuration] = useState("1");
@@ -57,6 +58,7 @@ export default function App() {
   const [rifBalance, setRifBalance] = useState<bigint | null>(null);
   const [isLoadingDomains, setIsLoadingDomains] = useState(false);
   const [minCommitmentAge, setMinCommitmentAge] = useState<number | null>(null);
+  const [supportsRegistryApproval, setSupportsRegistryApproval] = useState<boolean | null>(null);
   const [toasts, setToasts] = useState<
     { id: number; message: string; kind: "info" | "success" | "error" }[]
   >([]);
@@ -74,6 +76,51 @@ export default function App() {
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3500);
+  }
+
+  async function submitTx(
+    label: string,
+    action: () => Promise<`0x${string}`>,
+    onSuccess?: () => void
+  ) {
+    if (!publicClient) {
+      pushToast("Public client not ready.", "error");
+      return false;
+    }
+    pushToast(`Submitting ${label}...`);
+    try {
+      const hash = await action();
+      console.log(`[${label}] submitted`, hash);
+      pushToast(`${label} submitted: ${shorten(hash)}`);
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      console.log(`[${label}] receipt`, receipt);
+
+      if (receipt.status === "success") {
+      pushToast(`${label} confirmed.`, "success");
+      onSuccess?.();
+      return true;
+      }
+      pushToast(`${label} failed.`, "error");
+      return false;
+    } catch (error) {
+      console.error(`[${label}] error`, error);
+      pushToast(`${label} failed.`, "error");
+      return false;
+    }
+  }
+
+  async function refreshDomains() {
+    if (!publicClient || domains.length === 0) return;
+    try {
+      const rows = await fetchDomainsInfo(
+        publicClient,
+        domains.map((domain) => domain.label)
+      );
+      setDomains(rows);
+    } catch (error) {
+      // non-blocking
+    }
   }
 
   const selected = domains.filter((domain) => domain.selected);
@@ -116,16 +163,25 @@ export default function App() {
   useEffect(() => {
     async function checkApproval() {
       if (!publicClient || !address || !bulkManagerAddress) return;
-      const approved = await publicClient.readContract({
-        address: RNS_ADDRESSES.registry as Address,
-        abi: rnsRegistryAbi,
-        functionName: "isApprovedForAll",
-        args: [address, bulkManagerAddress]
-      });
-      setApproved(approved);
+      try {
+        const approved = await publicClient.readContract({
+          address: RNS_ADDRESSES.registry as Address,
+          abi: rnsRegistryAbi,
+          functionName: "isApprovedForAll",
+          args: [address, bulkManagerAddress]
+        });
+        setApproved(approved);
+        setSupportsRegistryApproval(true);
+      } catch (error) {
+        setApproved(false);
+        setSupportsRegistryApproval(false);
+      }
     }
 
-    checkApproval().catch(() => setApproved(false));
+    checkApproval().catch(() => {
+      setApproved(false);
+      setSupportsRegistryApproval(false);
+    });
   }, [address, bulkManagerAddress, publicClient]);
 
   useEffect(() => {
@@ -188,6 +244,10 @@ export default function App() {
       pushToast("Enter a valid bulk manager address.", "error");
       return;
     }
+    if (supportsRegistryApproval === false) {
+      pushToast("Registry approvals are not supported on this network.", "error");
+      return;
+    }
     if (walletChainId && walletChainId !== rootstockTestnet.id) {
       pushToast("Wrong network. Switch to Rootstock Testnet (chain 31).", "error");
       return;
@@ -196,44 +256,94 @@ export default function App() {
       pushToast("Wallet client not ready. Try reconnecting your wallet.", "error");
       return;
     }
-    pushToast("Submitting approval transaction...");
-    try {
-      const hash = await walletClient.writeContract({
-        address: RNS_ADDRESSES.registry as Address,
-        abi: rnsRegistryAbi,
-        functionName: "setApprovalForAll",
-        args: [bulkManagerAddress, true]
-      });
-      setApproved(true);
-      pushToast(`Approval submitted: ${shorten(hash)}`, "success");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Approval failed.";
-      pushToast(message, "error");
-    }
+    await submitTx(
+      "Approval",
+      () =>
+        walletClient.writeContract({
+          address: RNS_ADDRESSES.registry as Address,
+          abi: rnsRegistryAbi,
+          functionName: "setApprovalForAll",
+          args: [bulkManagerAddress, true]
+        }),
+      () => setApproved(true)
+    );
   }
 
   async function handleSetAddr() {
-    if (!walletClient || !bulkManagerAddress) return;
+    if (!walletClient) {
+      pushToast("Wallet client not ready.", "error");
+      return;
+    }
     if (!isAddress(newAddress)) {
       pushToast("Enter a valid address.", "error");
       return;
     }
-
-    const nodes = selected.map((domain) => domain.node);
-    const addrs = selected.map(() => newAddress as Address);
-
-    pushToast("Submitting batch setAddr transaction...");
-    try {
-      const hash = await walletClient.writeContract({
-        address: bulkManagerAddress,
-        abi: bulkManagerAbi,
-        functionName: "batchSetAddr",
-        args: [nodes, addrs, true]
-      });
-      pushToast(`batchSetAddr submitted: ${shorten(hash)}`, "success");
-    } catch (error) {
-      pushToast("batchSetAddr failed.", "error");
+    if (selected.length !== 1) {
+      pushToast("Select exactly one name to set an address.", "error");
+      return;
     }
+
+    const domain = selected[0];
+    let resolver = domain.resolver;
+    if (!resolver || resolver === ZERO_ADDRESS) {
+      if (!publicClient) {
+        pushToast("Resolver not found. Load domains first.", "error");
+        return;
+      }
+      try {
+        resolver = await publicClient.readContract({
+          address: RNS_ADDRESSES.registry as Address,
+          abi: rnsRegistryAbi,
+          functionName: "resolver",
+          args: [domain.node]
+        });
+      } catch (error) {
+        resolver = null;
+      }
+    }
+
+    if (!resolver || resolver === ZERO_ADDRESS) {
+      pushToast("Resolver is not set for this name. Set resolver first.", "error");
+      return;
+    }
+
+    await submitTx("Set Address", () =>
+      walletClient.writeContract({
+        address: resolver as Address,
+        abi: rnsResolverAbi,
+        functionName: "setAddr",
+        args: [domain.node, newAddress as Address]
+      }),
+      () => refreshDomains()
+    );
+  }
+
+  async function handleSetResolver() {
+    if (!walletClient) {
+      pushToast("Wallet client not ready.", "error");
+      return;
+    }
+    if (!isAddress(resolverAddress)) {
+      pushToast("Enter a valid resolver address.", "error");
+      return;
+    }
+    if (selected.length !== 1) {
+      pushToast("Select exactly one name to set a resolver.", "error");
+      return;
+    }
+
+    const node = selected[0].node;
+    await submitTx(
+      "Set Resolver",
+      () =>
+        walletClient.writeContract({
+          address: RNS_ADDRESSES.registry as Address,
+          abi: rnsRegistryAbi,
+          functionName: "setResolver",
+          args: [node, resolverAddress as Address]
+        }),
+      () => refreshDomains()
+    );
   }
 
   async function handleRenew() {
@@ -281,18 +391,14 @@ export default function App() {
       });
     }
 
-    pushToast("Submitting batch renew transaction (RIF transferAndCall)...");
-    try {
-      const hash = await walletClient.writeContract({
+    await submitTx("Renew", () =>
+      walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
         functionName: "multicall",
         args: [calls, false]
-      });
-      pushToast(`batchRenew submitted: ${shorten(hash)}`, "success");
-    } catch (error) {
-      pushToast("batchRenew failed.", "error");
-    }
+      })
+    );
   }
 
   async function handleCommit() {
@@ -333,22 +439,21 @@ export default function App() {
       }, {} as Record<string, `0x${string}`>)
     }));
 
-    pushToast("Submitting bulk commit transaction...");
-    try {
-      const hash = await walletClient.writeContract({
+    await submitTx("Bulk Commit", () =>
+      walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
         functionName: "batchCommit",
         args: [commitmentsArray, false]
-      });
-      const waitText =
-        minCommitmentAge !== null
-          ? `Wait at least ${formatWait(minCommitmentAge)} before registering.`
-          : "Wait minCommitmentAge before registering.";
-      pushToast(`bulkCommit submitted: ${shorten(hash)}. ${waitText}`, "success");
-    } catch (error) {
-      pushToast("bulkCommit failed.", "error");
-    }
+      }),
+      () => {
+        const waitText =
+          minCommitmentAge !== null
+            ? `Wait at least ${formatWait(minCommitmentAge)} before registering.`
+            : "Wait minCommitmentAge before registering.";
+        pushToast(waitText, "info");
+      }
+    );
   }
 
   async function handleRegister() {
@@ -411,18 +516,14 @@ export default function App() {
       });
     }
 
-    pushToast("Submitting bulk register transaction (RIF transferAndCall)...");
-    try {
-      const hash = await walletClient.writeContract({
+    await submitTx("Bulk Register", () =>
+      walletClient.writeContract({
         address: bulkManagerAddress,
         abi: bulkManagerAbi,
         functionName: "multicall",
         args: [calls, false]
-      });
-      pushToast(`bulkRegister submitted: ${shorten(hash)}`, "success");
-    } catch (error) {
-      pushToast("bulkRegister failed.", "error");
-    }
+      })
+    );
   }
 
   function toggleSelect(index: number) {
@@ -489,18 +590,24 @@ export default function App() {
                 disabled
               />
             </div>
-            <button
-              className="h-[52px] self-end rounded-2xl border border-white/20 px-5 text-sm text-white hover:border-sun hover:text-sun"
-              onClick={handleApproval}
-              disabled={
-                !isConnected ||
-                !bulkManagerAddress ||
-                !walletClient ||
-                (walletChainId !== undefined && walletChainId !== rootstockTestnet.id)
-              }
-            >
-              {approved ? "Bulk Manager Approved" : "Approve Bulk Manager"}
-            </button>
+            {supportsRegistryApproval !== false ? (
+              <button
+                className="h-[52px] self-end rounded-2xl border border-white/20 px-5 text-sm text-white hover:border-sun hover:text-sun"
+                onClick={handleApproval}
+                disabled={
+                  !isConnected ||
+                  !bulkManagerAddress ||
+                  !walletClient ||
+                  (walletChainId !== undefined && walletChainId !== rootstockTestnet.id)
+                }
+              >
+                {approved ? "Bulk Manager Approved" : "Approve Bulk Manager"}
+              </button>
+            ) : (
+              <div className="self-end text-xs text-steel">
+                Registry approvals not supported on this network.
+              </div>
+            )}
           </div>
           {!isConnected && (
             <p className="mt-2 text-xs text-steel">Connect your wallet to approve the bulk manager.</p>
@@ -514,9 +621,14 @@ export default function App() {
           {isConnected && bulkManagerAddress && !walletClient && (
             <p className="mt-2 text-xs text-steel">Wallet client not ready. Try reconnecting.</p>
           )}
+          {supportsRegistryApproval === false && (
+            <p className="mt-2 text-xs text-steel">
+              This registry does not support operator approvals. You can still set addresses directly.
+            </p>
+          )}
           <p className="mt-3 text-xs text-steel">
-            Approval grants this contract operator rights in the RNS registry so it can update
-            resolver records on your behalf.
+            Registry approvals are optional. Set Address uses your wallet directly and does not
+            require approval.
           </p>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-ink/60 px-4 py-3 text-xs text-steel">
             <span>Bulk Manager RIF balance</span>
@@ -581,7 +693,8 @@ export default function App() {
                 <tr>
                   <th className="pb-3">Select</th>
                   <th className="pb-3">Domain</th>
-                  <th className="pb-3">Resolver Addr</th>
+                  <th className="pb-3">Resolver</th>
+                  <th className="pb-3">Resolved Addr</th>
                   <th className="pb-3">Expiry</th>
                   <th className="pb-3">Namehash</th>
                 </tr>
@@ -598,6 +711,23 @@ export default function App() {
                       />
                     </td>
                     <td className="py-4 font-semibold">{domain.name}</td>
+                    <td className="py-4 text-steel">
+                      {domain.resolver && domain.resolver !== ZERO_ADDRESS ? (
+                        <button
+                          type="button"
+                          className="rounded-full border border-white/10 px-3 py-1 text-xs text-steel hover:border-sun hover:text-sun"
+                          onClick={() => {
+                            navigator.clipboard.writeText(domain.resolver ?? "");
+                            pushToast("Resolver copied.", "success");
+                          }}
+                          title="Copy resolver address"
+                        >
+                          {shorten(domain.resolver)}
+                        </button>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="py-4 text-steel">
                       {domain.address && domain.address !== ZERO_ADDRESS ? (
                         <button
@@ -645,6 +775,27 @@ export default function App() {
 
             <div className="mt-6 space-y-6">
               <div>
+                <label className="text-xs uppercase tracking-wider text-steel">Set Resolver</label>
+                <div className="mt-2 flex flex-wrap gap-3">
+                  <input
+                    value={resolverAddress}
+                    onChange={(event) => setResolverAddress(event.target.value)}
+                    placeholder={RNS_ADDRESSES.resolver}
+                    className="flex-1 rounded-2xl border border-white/10 bg-ink/60 px-4 py-3 text-sm text-white"
+                  />
+                  <button
+                    className="rounded-2xl border border-white/20 px-5 py-3 text-sm text-white"
+                    onClick={handleSetResolver}
+                    disabled={!walletClient || selected.length !== 1}
+                  >
+                    Set Resolver
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-steel">
+                  Sets the resolver contract for the selected name. The default resolver is prefilled.
+                </p>
+              </div>
+              <div>
                 <label className="text-xs uppercase tracking-wider text-steel">Set Address Record</label>
                 <div className="mt-2 flex flex-wrap gap-3">
                   <input
@@ -656,13 +807,13 @@ export default function App() {
                   <button
                     className="rounded-2xl bg-sun px-5 py-3 text-sm font-semibold text-ink"
                     onClick={handleSetAddr}
-                    disabled={!selected.length || !bulkManagerAddress}
+                    disabled={!walletClient || selected.length !== 1}
                   >
                     Set Address
                   </button>
                 </div>
                 <p className="mt-2 text-xs text-steel">
-                  Writes the resolver address record for each selected name (requires registry approval).
+                  Writes the resolved address for the selected name. Select exactly one name.
                 </p>
               </div>
 

@@ -7,6 +7,7 @@ export type DomainRow = {
   label: string;
   name: string;
   node: `0x${string}`;
+  resolver: Address | null;
   address: Address | null;
   expiresAt?: number;
   selected: boolean;
@@ -63,6 +64,7 @@ export async function fetchDomainInfo(
     label: normalized,
     name,
     node,
+    resolver,
     address,
     expiresAt,
     selected: false
@@ -144,6 +146,7 @@ export async function fetchDomainsInfo(
       label,
       name: names[index],
       node: nodes[index],
+      resolver: resolvers[index],
       address: resolvedAddrs[index],
       expiresAt: expirations[index] ? Number(expirations[index]) : undefined,
       selected: false
