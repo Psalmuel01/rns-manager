@@ -67,21 +67,26 @@ From Rootstock/RNS packages and docs:
 ## Contract Notes
 
 - `RNSBulkManager` is a wrapper: it batches calls to existing RNS contracts. It does not replace them.
-- For resolver updates, the user must approve the bulk manager as an operator in the RNS registry.
 - `batchRegister`/`batchRenew` accept raw calldata for the registrar/renewer; this keeps the contract
   flexible across RNS implementations.
+- Registry operator approvals are optional and **not supported** on some networks (including the
+  current Rootstock Testnet registry). In that case, resolver updates must be sent directly
+  from the user’s wallet (no batching for `setAddr`).
 
 ## Frontend Notes
 
 - The UI loads domain metadata using the registry + resolver + RSK Owner contracts.
 - The domain list is input-driven (paste labels). If you want auto-discovery, add an indexer or
-  The Graph integration.
 - The bulk register panel uses the RSK Registrar token-based flow (ERC-677 `transferAndCall`).
   It encodes the registrar payload as `register(name, nameOwner, secret, duration)` and
   sends RIF tokens to the registrar for payment. Adjust `frontend/src/abi/registrar.ts`
   and `frontend/src/lib/rnsEncoding.ts` if your registrar differs.
 - Because the bulk manager is the caller in batch transactions, it must hold enough RIF to
   cover the batch. Transfer RIF to the bulk manager address before registering/renewing.
+- **Set Address** uses a direct wallet transaction to the resolver (single-name only) because the
+  testnet registry doesn’t support operator approvals. If a resolver isn’t set, the call will fail.
+- The UI shows confirmation toasts after transactions are mined and logs tx hashes/receipts to the console.
+- The commit flow shows a live countdown based on `minCommitmentAge`.
 
 ## Tests
 
