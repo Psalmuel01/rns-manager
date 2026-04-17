@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.24;
 
 import {MockRegistry} from "./MockRegistry.sol";
 
@@ -24,6 +24,7 @@ contract MockRegistrar {
     function register(string calldata label, address owner, uint256 duration) external payable {
         uint256 price = duration * pricePerSecond;
         require(msg.value >= price, "Insufficient payment");
+        // The test mocks use a simplified namehash rooted at bytes32(0) to keep fixtures small.
         bytes32 labelhash = keccak256(bytes(label));
         bytes32 node = keccak256(abi.encodePacked(bytes32(0), labelhash));
         registry.setOwner(node, owner);

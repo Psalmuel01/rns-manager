@@ -11,7 +11,7 @@ function labelToNode(label: string): string {
 
 describe("RNSBulkManager", function () {
   async function deployFixture() {
-    const [deployer, user] = await ethers.getSigners();
+    const [deployer, user, stranger] = await ethers.getSigners();
 
     const Registry = await ethers.getContractFactory("MockRegistry");
     const registry = await Registry.deploy();
@@ -25,88 +25,255 @@ describe("RNSBulkManager", function () {
     const Renewer = await ethers.getContractFactory("MockRenewer");
     const renewer = await Renewer.deploy(1n);
 
+    const Token = await ethers.getContractFactory("MockERC677");
+    const rifToken = await Token.deploy();
+
     const Bulk = await ethers.getContractFactory("RNSBulkManager");
     const bulkManager = await Bulk.deploy(
       await registrar.getAddress(),
       await renewer.getAddress(),
       await resolver.getAddress(),
-      await registry.getAddress()
+      await registry.getAddress(),
+      await rifToken.getAddress()
     );
 
-    return { deployer, user, registry, resolver, registrar, renewer, bulkManager };
+    return { deployer, user, stranger, registry, resolver, registrar, renewer, rifToken, bulkManager };
   }
 
-  it("batchRegister registers multiple names", async function () {
+  it("rejects zero addresses in the constructor", async function () {
+    const Registry = await ethers.getContractFactory("MockRegistry");
+    const registry = await Registry.deploy();
+
+    const Resolver = await ethers.getContractFactory("MockResolver");
+    const resolver = await Resolver.deploy(await registry.getAddress());
+
+    const Registrar = await ethers.getContractFactory("MockRegistrar");
+    const registrar = await Registrar.deploy(await registry.getAddress(), 1n);
+
+    const Renewer = await ethers.getContractFactory("MockRenewer");
+    const renewer = await Renewer.deploy(1n);
+
+    const Bulk = await ethers.getContractFactory("RNSBulkManager");
+
+    await expect(
+      Bulk.deploy(
+        await registrar.getAddress(),
+        await renewer.getAddress(),
+        await resolver.getAddress(),
+        await registry.getAddress(),
+        ethers.ZeroAddress
+      )
+    ).to.be.revertedWithCustomError(Bulk, "ZeroAddressTarget");
+  });
+
+  it("only lets the owner update targets and rejects zero addresses", async function () {
+    const { bulkManager, registrar, renewer, resolver, registry, rifToken, user } = await deployFixture();
+
+    await expect(
+      bulkManager
+        .connect(user)
+        .setTargets(
+          await registrar.getAddress(),
+          await renewer.getAddress(),
+          await resolver.getAddress(),
+          await registry.getAddress(),
+          await rifToken.getAddress()
+        )
+    )
+      .to.be.revertedWithCustomError(bulkManager, "OwnableUnauthorizedAccount")
+      .withArgs(user.address);
+
+    await expect(
+      bulkManager.setTargets(
+        await registrar.getAddress(),
+        await renewer.getAddress(),
+        await resolver.getAddress(),
+        await registry.getAddress(),
+        ethers.ZeroAddress
+      )
+    ).to.be.revertedWithCustomError(bulkManager, "ZeroAddressTarget");
+  });
+
+  it("batchCommit stores every commitment", async function () {
+    const { bulkManager, registrar } = await deployFixture();
+
+    const commitments = [ethers.keccak256(ethers.toUtf8Bytes("alpha")), ethers.keccak256(ethers.toUtf8Bytes("beta"))];
+
+    await bulkManager.batchCommit(commitments, true);
+
+    expect(await registrar.commitments(commitments[0])).to.equal(true);
+    expect(await registrar.commitments(commitments[1])).to.equal(true);
+  });
+
+  it("batchRegister registers multiple labels", async function () {
     const { bulkManager, registrar, registry, user } = await deployFixture();
 
     const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", user.address, ONE_YEAR]);
     const registerBob = registrar.interface.encodeFunctionData("register", ["bob", user.address, ONE_YEAR]);
-    const value = 1n * ONE_YEAR;
+    const value = ONE_YEAR;
 
     await bulkManager.batchRegister([registerAlice, registerBob], [value, value], true, { value: value * 2n });
 
-    const aliceNode = labelToNode("alice");
-    const bobNode = labelToNode("bob");
-
-    expect(await registry.owner(aliceNode)).to.equal(user.address);
-    expect(await registry.owner(bobNode)).to.equal(user.address);
+    expect(await registry.owner(labelToNode("alice"))).to.equal(user.address);
+    expect(await registry.owner(labelToNode("bob"))).to.equal(user.address);
   });
 
-  it("batchRegister can continue on failures when revertOnFail=false", async function () {
-    const { bulkManager, registrar } = await deployFixture();
+  it("batchRenew renews multiple labels", async function () {
+    const { bulkManager, renewer } = await deployFixture();
 
-    const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", registrar.target, ONE_YEAR]);
-    const registerBob = registrar.interface.encodeFunctionData("register", ["bob", registrar.target, ONE_YEAR]);
-    const value = 1n * ONE_YEAR;
+    const renewAlpha = renewer.interface.encodeFunctionData("renew", ["alpha", ONE_YEAR]);
+    const renewBeta = renewer.interface.encodeFunctionData("renew", ["beta", ONE_YEAR / 2n]);
 
-    const results = await bulkManager.batchRegister.staticCall(
-      [registerAlice, registerBob],
-      [value, 0n],
-      false,
-      { value }
-    );
+    await bulkManager.batchRenew([renewAlpha, renewBeta], [ONE_YEAR, ONE_YEAR / 2n], true, {
+      value: ONE_YEAR + ONE_YEAR / 2n
+    });
 
-    expect(results[0].success).to.equal(true);
-    expect(results[1].success).to.equal(false);
-
-    await expect(bulkManager.batchRegister([registerAlice, registerBob], [value, 0n], false, { value }))
-      .to.emit(bulkManager, "CallFailed")
-      .withArgs(1, registrar.target, registerBob, anyValue);
+    expect(await renewer.expirations(ethers.keccak256(ethers.toUtf8Bytes("alpha")))).to.equal(ONE_YEAR);
+    expect(await renewer.expirations(ethers.keccak256(ethers.toUtf8Bytes("beta")))).to.equal(ONE_YEAR / 2n);
   });
 
-  it("batchSetAddr respects registry approvals", async function () {
-    const { bulkManager, registrar, registry, resolver, user } = await deployFixture();
+  it("batchSetResolver updates registry resolver when the owner approved the manager", async function () {
+    const { bulkManager, registry, resolver, user } = await deployFixture();
+    const node = labelToNode("sammy");
 
-    const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", user.address, ONE_YEAR]);
-    const value = 1n * ONE_YEAR;
-    await bulkManager.batchRegister([registerAlice], [value], true, { value });
-
-    const aliceNode = labelToNode("alice");
-    const targetAddress = "0x000000000000000000000000000000000000dEaD";
-
-    const failedResults = await bulkManager.batchSetAddr.staticCall([aliceNode], [targetAddress], false);
-    expect(failedResults[0].success).to.equal(false);
-
+    await registry.setOwner(node, user.address);
     await registry.connect(user).setApprovalForAll(await bulkManager.getAddress(), true);
 
-    const successResults = await bulkManager.batchSetAddr.staticCall([aliceNode], [targetAddress], true);
-    expect(successResults[0].success).to.equal(true);
+    await bulkManager.batchSetResolver([node], await resolver.getAddress(), true);
 
-    await bulkManager.batchSetAddr([aliceNode], [targetAddress], true);
-    expect(await resolver.addr(aliceNode)).to.equal(targetAddress);
+    expect(await registry.resolver(node)).to.equal(await resolver.getAddress());
   });
 
-  it("multicall refunds unused value", async function () {
-    const { bulkManager, registrar } = await deployFixture();
-    const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", registrar.target, ONE_YEAR]);
-    const value = 1n * ONE_YEAR;
+  it("batchSetAddr updates resolver records when the owner approved the manager", async function () {
+    const { bulkManager, registry, resolver, user } = await deployFixture();
+    const node = labelToNode("sammy");
+    const targetAddress = "0x000000000000000000000000000000000000dEaD";
 
-    const before = await ethers.provider.getBalance(bulkManager.target);
-    expect(before).to.equal(0n);
+    await registry.setOwner(node, user.address);
+    await registry.connect(user).setResolver(node, await resolver.getAddress());
+    await registry.connect(user).setApprovalForAll(await bulkManager.getAddress(), true);
 
-    await bulkManager.batchRegister([registerAlice], [value], true, { value: value + 1000n });
+    await bulkManager.batchSetAddr([node], [targetAddress], true);
 
-    const after = await ethers.provider.getBalance(bulkManager.target);
-    expect(after).to.equal(0n);
+    expect(await resolver.addr(node)).to.equal(targetAddress);
+  });
+
+  it("rejects mismatched array lengths", async function () {
+    const { bulkManager, renewer } = await deployFixture();
+    const renewCall = renewer.interface.encodeFunctionData("renew", ["alpha", ONE_YEAR]);
+
+    await expect(bulkManager.batchRegister([], [1n], true)).to.be.revertedWithCustomError(
+      bulkManager,
+      "LengthMismatch"
+    );
+    await expect(bulkManager.batchRenew([renewCall], [], true)).to.be.revertedWithCustomError(
+      bulkManager,
+      "LengthMismatch"
+    );
+    await expect(
+      bulkManager.batchSetAddr([labelToNode("alpha")], [ethers.ZeroAddress, ethers.ZeroAddress], true)
+    ).to.be.revertedWithCustomError(bulkManager, "LengthMismatch");
+  });
+
+  it("checks value sufficiency before executing register calls", async function () {
+    const { bulkManager, registrar, registry, user } = await deployFixture();
+    const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", user.address, ONE_YEAR]);
+
+    await expect(bulkManager.batchRegister([registerAlice], [ONE_YEAR], false, { value: ONE_YEAR - 1n }))
+      .to.be.revertedWithCustomError(bulkManager, "ValueMismatch")
+      .withArgs(ONE_YEAR, ONE_YEAR - 1n);
+
+    expect(await registry.owner(labelToNode("alice"))).to.equal(ethers.ZeroAddress);
+  });
+
+  it("restricts multicall to RIF transferAndCall into the registrar or renewer", async function () {
+    const { bulkManager, rifToken, registrar, renewer, user } = await deployFixture();
+
+    const invalidTransferAndCall = rifToken.interface.encodeFunctionData("transferAndCall", [
+      user.address,
+      10n,
+      "0x1234"
+    ]);
+    const approveCall = rifToken.interface.encodeFunctionData("approve", [user.address, 10n]);
+    const renewTransfer = rifToken.interface.encodeFunctionData("transferAndCall", [
+      await renewer.getAddress(),
+      20n,
+      "0xabcd"
+    ]);
+
+    await rifToken.mint(await bulkManager.getAddress(), 50n);
+
+    await expect(
+      bulkManager.multicall([{ target: ethers.ZeroAddress, value: 0n, data: "0x" }], false)
+    ).to.be.revertedWithCustomError(bulkManager, "ZeroAddressTarget");
+
+    await expect(
+      bulkManager.multicall([{ target: await registrar.getAddress(), value: 0n, data: "0x12345678" }], false)
+    )
+      .to.be.revertedWithCustomError(bulkManager, "InvalidTarget")
+      .withArgs(await registrar.getAddress());
+
+    await expect(
+      bulkManager.multicall([{ target: await rifToken.getAddress(), value: 0n, data: approveCall }], false)
+    )
+      .to.be.revertedWithCustomError(bulkManager, "InvalidSelector")
+      .withArgs(approveCall.slice(0, 10));
+
+    await expect(
+      bulkManager.multicall(
+        [{ target: await rifToken.getAddress(), value: 0n, data: invalidTransferAndCall }],
+        false
+      )
+    )
+      .to.be.revertedWithCustomError(bulkManager, "InvalidTokenTarget")
+      .withArgs(user.address);
+
+    await expect(
+      bulkManager.multicall([{ target: await rifToken.getAddress(), value: 0n, data: renewTransfer }], false)
+    )
+      .to.emit(rifToken, "TransferAndCalled")
+      .withArgs(await renewer.getAddress(), 20n, "0xabcd");
+  });
+
+  it("emits failures without reverting when revertOnFail is false", async function () {
+    const { bulkManager, resolver } = await deployFixture();
+    const node = labelToNode("no-owner");
+
+    const results = await bulkManager.batchSetAddr.staticCall(
+      [node],
+      ["0x000000000000000000000000000000000000dEaD"],
+      false
+    );
+
+    expect(results[0].success).to.equal(false);
+
+    await expect(
+      bulkManager.batchSetAddr([node], ["0x000000000000000000000000000000000000dEaD"], false)
+    )
+      .to.emit(bulkManager, "CallFailed")
+      .withArgs(0, await resolver.getAddress(), anyValue, anyValue);
+  });
+
+  it("refunds excess ETH and exposes rescue functions to the owner", async function () {
+    const { bulkManager, registrar, rifToken, deployer, user } = await deployFixture();
+    const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", user.address, ONE_YEAR]);
+
+    await rifToken.mint(await bulkManager.getAddress(), 100n);
+
+    await expect(
+      bulkManager.connect(user).rescueTokens(await rifToken.getAddress(), user.address, 1n)
+    )
+      .to.be.revertedWithCustomError(bulkManager, "OwnableUnauthorizedAccount")
+      .withArgs(user.address);
+
+    await bulkManager.batchRegister([registerAlice], [ONE_YEAR], true, { value: ONE_YEAR + 1000n });
+    expect(await ethers.provider.getBalance(await bulkManager.getAddress())).to.equal(0n);
+
+    await deployer.sendTransaction({ to: await bulkManager.getAddress(), value: 5_000n });
+    await bulkManager.rescueETH(deployer.address, 5_000n);
+    expect(await ethers.provider.getBalance(await bulkManager.getAddress())).to.equal(0n);
+
+    await bulkManager.rescueTokens(await rifToken.getAddress(), deployer.address, 100n);
+    expect(await rifToken.balanceOf(deployer.address)).to.equal(100n);
   });
 });

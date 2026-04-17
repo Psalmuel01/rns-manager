@@ -6,7 +6,13 @@ async function main() {
   const addresses = withEnvOverrides(Number(network.chainId));
 
   const Bulk = await ethers.getContractFactory("RNSBulkManager");
-  const bulk = await Bulk.deploy(addresses.registrar, addresses.renewer, addresses.resolver, addresses.registry);
+  const bulk = await Bulk.deploy(
+    addresses.registrar,
+    addresses.renewer,
+    addresses.resolver,
+    addresses.registry,
+    addresses.rifToken
+  );
   await bulk.waitForDeployment();
 
   const bulkAddress = await bulk.getAddress();

@@ -5,6 +5,7 @@ import { WagmiProvider, createConfig, http } from "wagmi";
 import { injected } from "wagmi/connectors";
 import { rootstockTestnet } from "./lib/chain";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 
 const config = createConfig({
@@ -19,10 +20,12 @@ const queryClient = new QueryClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient}>
-        <App />
-      </QueryClientProvider>
-    </WagmiProvider>
+    <ErrorBoundary>
+      <WagmiProvider config={config}>
+        <QueryClientProvider client={queryClient}>
+          <App />
+        </QueryClientProvider>
+      </WagmiProvider>
+    </ErrorBoundary>
   </React.StrictMode>
 );
