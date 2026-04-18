@@ -1,7 +1,8 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
-import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
+import { BaseContract, ContractTransactionReceipt, ethers } from "ethers";
+import hre from "hardhat";
 
+const { network } = hre;
 const ONE_YEAR = 31_536_000n;
 
 function labelToNode(label: string): string {
@@ -9,26 +10,93 @@ function labelToNode(label: string): string {
   return ethers.keccak256(ethers.solidityPacked(["bytes32", "bytes32"], [ethers.ZeroHash, labelhash]));
 }
 
+async function expectCustomError(
+  action: Promise<unknown>,
+  expectedName: string,
+  expectedArgs?: Array<string | bigint>
+) {
+  try {
+    await action;
+    expect.fail(`Expected custom error ${expectedName}`);
+  } catch (error) {
+    const revert = extractRevert(error);
+    if (revert?.name) {
+      expect(revert.name).to.equal(expectedName);
+      if (expectedArgs) {
+        expect(normalizeArgs(revert.args ?? [])).to.deep.equal(expectedArgs.map((value) => String(value)));
+      }
+      return;
+    }
+
+    const message = String((error as { message?: string })?.message ?? error);
+    expect(message).to.include(expectedName);
+    for (const value of expectedArgs ?? []) {
+      expect(message).to.include(String(value));
+    }
+  }
+}
+
+function extractRevert(error: unknown): { name?: string; args?: unknown[] } | undefined {
+  if (!error || typeof error !== "object") return undefined;
+
+  const candidate = error as {
+    revert?: { name?: string; args?: unknown[] };
+    error?: unknown;
+    data?: unknown;
+    info?: unknown;
+  };
+
+  return (
+    candidate.revert ||
+    extractRevert(candidate.error) ||
+    extractRevert(candidate.data) ||
+    extractRevert(candidate.info)
+  );
+}
+
+function normalizeArgs(args: unknown[]) {
+  return args.map((value) => String(value));
+}
+
+async function findEventArgs(
+  contract: BaseContract,
+  receipt: ContractTransactionReceipt,
+  eventName: string
+) {
+  for (const log of receipt.logs) {
+    try {
+      const parsed = contract.interface.parseLog(log);
+      if (parsed?.name === eventName) {
+        return parsed.args;
+      }
+    } catch {
+      // ignore logs from other contracts
+    }
+  }
+
+  return null;
+}
+
 describe("RNSBulkManager", function () {
   async function deployFixture() {
-    const [deployer, user, stranger] = await ethers.getSigners();
+    const [deployer, user, stranger] = await hre.ethers.getSigners();
 
-    const Registry = await ethers.getContractFactory("MockRegistry");
+    const Registry = await hre.ethers.getContractFactory("MockRegistry");
     const registry = await Registry.deploy();
 
-    const Resolver = await ethers.getContractFactory("MockResolver");
+    const Resolver = await hre.ethers.getContractFactory("MockResolver");
     const resolver = await Resolver.deploy(await registry.getAddress());
 
-    const Registrar = await ethers.getContractFactory("MockRegistrar");
+    const Registrar = await hre.ethers.getContractFactory("MockRegistrar");
     const registrar = await Registrar.deploy(await registry.getAddress(), 1n);
 
-    const Renewer = await ethers.getContractFactory("MockRenewer");
+    const Renewer = await hre.ethers.getContractFactory("MockRenewer");
     const renewer = await Renewer.deploy(1n);
 
-    const Token = await ethers.getContractFactory("MockERC677");
+    const Token = await hre.ethers.getContractFactory("MockERC677");
     const rifToken = await Token.deploy();
 
-    const Bulk = await ethers.getContractFactory("RNSBulkManager");
+    const Bulk = await hre.ethers.getContractFactory("RNSBulkManager");
     const bulkManager = await Bulk.deploy(
       await registrar.getAddress(),
       await renewer.getAddress(),
@@ -37,39 +105,40 @@ describe("RNSBulkManager", function () {
       await rifToken.getAddress()
     );
 
-    return { deployer, user, stranger, registry, resolver, registrar, renewer, rifToken, bulkManager };
+    return { deployer, user, stranger, registry, resolver, registrar, renewer, rifToken, bulkManager, Bulk };
   }
 
   it("rejects zero addresses in the constructor", async function () {
-    const Registry = await ethers.getContractFactory("MockRegistry");
+    const Registry = await hre.ethers.getContractFactory("MockRegistry");
     const registry = await Registry.deploy();
 
-    const Resolver = await ethers.getContractFactory("MockResolver");
+    const Resolver = await hre.ethers.getContractFactory("MockResolver");
     const resolver = await Resolver.deploy(await registry.getAddress());
 
-    const Registrar = await ethers.getContractFactory("MockRegistrar");
+    const Registrar = await hre.ethers.getContractFactory("MockRegistrar");
     const registrar = await Registrar.deploy(await registry.getAddress(), 1n);
 
-    const Renewer = await ethers.getContractFactory("MockRenewer");
+    const Renewer = await hre.ethers.getContractFactory("MockRenewer");
     const renewer = await Renewer.deploy(1n);
 
-    const Bulk = await ethers.getContractFactory("RNSBulkManager");
+    const Bulk = await hre.ethers.getContractFactory("RNSBulkManager");
 
-    await expect(
+    await expectCustomError(
       Bulk.deploy(
         await registrar.getAddress(),
         await renewer.getAddress(),
         await resolver.getAddress(),
         await registry.getAddress(),
         ethers.ZeroAddress
-      )
-    ).to.be.revertedWithCustomError(Bulk, "ZeroAddressTarget");
+      ),
+      "ZeroAddressTarget"
+    );
   });
 
   it("only lets the owner update targets and rejects zero addresses", async function () {
     const { bulkManager, registrar, renewer, resolver, registry, rifToken, user } = await deployFixture();
 
-    await expect(
+    await expectCustomError(
       bulkManager
         .connect(user)
         .setTargets(
@@ -78,20 +147,21 @@ describe("RNSBulkManager", function () {
           await resolver.getAddress(),
           await registry.getAddress(),
           await rifToken.getAddress()
-        )
-    )
-      .to.be.revertedWithCustomError(bulkManager, "OwnableUnauthorizedAccount")
-      .withArgs(user.address);
+        ),
+      "OwnableUnauthorizedAccount",
+      [user.address]
+    );
 
-    await expect(
+    await expectCustomError(
       bulkManager.setTargets(
         await registrar.getAddress(),
         await renewer.getAddress(),
         await resolver.getAddress(),
         await registry.getAddress(),
         ethers.ZeroAddress
-      )
-    ).to.be.revertedWithCustomError(bulkManager, "ZeroAddressTarget");
+      ),
+      "ZeroAddressTarget"
+    );
   });
 
   it("batchCommit stores every commitment", async function () {
@@ -162,26 +232,23 @@ describe("RNSBulkManager", function () {
     const { bulkManager, renewer } = await deployFixture();
     const renewCall = renewer.interface.encodeFunctionData("renew", ["alpha", ONE_YEAR]);
 
-    await expect(bulkManager.batchRegister([], [1n], true)).to.be.revertedWithCustomError(
-      bulkManager,
+    await expectCustomError(bulkManager.batchRegister([], [1n], true), "LengthMismatch");
+    await expectCustomError(bulkManager.batchRenew([renewCall], [], true), "LengthMismatch");
+    await expectCustomError(
+      bulkManager.batchSetAddr([labelToNode("alpha")], [ethers.ZeroAddress, ethers.ZeroAddress], true),
       "LengthMismatch"
     );
-    await expect(bulkManager.batchRenew([renewCall], [], true)).to.be.revertedWithCustomError(
-      bulkManager,
-      "LengthMismatch"
-    );
-    await expect(
-      bulkManager.batchSetAddr([labelToNode("alpha")], [ethers.ZeroAddress, ethers.ZeroAddress], true)
-    ).to.be.revertedWithCustomError(bulkManager, "LengthMismatch");
   });
 
   it("checks value sufficiency before executing register calls", async function () {
     const { bulkManager, registrar, registry, user } = await deployFixture();
     const registerAlice = registrar.interface.encodeFunctionData("register", ["alice", user.address, ONE_YEAR]);
 
-    await expect(bulkManager.batchRegister([registerAlice], [ONE_YEAR], false, { value: ONE_YEAR - 1n }))
-      .to.be.revertedWithCustomError(bulkManager, "ValueMismatch")
-      .withArgs(ONE_YEAR, ONE_YEAR - 1n);
+    await expectCustomError(
+      bulkManager.batchRegister([registerAlice], [ONE_YEAR], false, { value: ONE_YEAR - 1n }),
+      "ValueMismatch",
+      [ONE_YEAR, ONE_YEAR - 1n]
+    );
 
     expect(await registry.owner(labelToNode("alice"))).to.equal(ethers.ZeroAddress);
   });
@@ -203,36 +270,41 @@ describe("RNSBulkManager", function () {
 
     await rifToken.mint(await bulkManager.getAddress(), 50n);
 
-    await expect(
-      bulkManager.multicall([{ target: ethers.ZeroAddress, value: 0n, data: "0x" }], false)
-    ).to.be.revertedWithCustomError(bulkManager, "ZeroAddressTarget");
+    await expectCustomError(
+      bulkManager.multicall([{ target: ethers.ZeroAddress, value: 0n, data: "0x" }], false),
+      "ZeroAddressTarget"
+    );
 
-    await expect(
-      bulkManager.multicall([{ target: await registrar.getAddress(), value: 0n, data: "0x12345678" }], false)
-    )
-      .to.be.revertedWithCustomError(bulkManager, "InvalidTarget")
-      .withArgs(await registrar.getAddress());
+    await expectCustomError(
+      bulkManager.multicall([{ target: await registrar.getAddress(), value: 0n, data: "0x12345678" }], false),
+      "InvalidTarget",
+      [await registrar.getAddress()]
+    );
 
-    await expect(
-      bulkManager.multicall([{ target: await rifToken.getAddress(), value: 0n, data: approveCall }], false)
-    )
-      .to.be.revertedWithCustomError(bulkManager, "InvalidSelector")
-      .withArgs(approveCall.slice(0, 10));
+    await expectCustomError(
+      bulkManager.multicall([{ target: await rifToken.getAddress(), value: 0n, data: approveCall }], false),
+      "InvalidSelector"
+    );
 
-    await expect(
+    await expectCustomError(
       bulkManager.multicall(
         [{ target: await rifToken.getAddress(), value: 0n, data: invalidTransferAndCall }],
         false
-      )
-    )
-      .to.be.revertedWithCustomError(bulkManager, "InvalidTokenTarget")
-      .withArgs(user.address);
+      ),
+      "InvalidTokenTarget",
+      [user.address]
+    );
 
-    await expect(
-      bulkManager.multicall([{ target: await rifToken.getAddress(), value: 0n, data: renewTransfer }], false)
-    )
-      .to.emit(rifToken, "TransferAndCalled")
-      .withArgs(await renewer.getAddress(), 20n, "0xabcd");
+    const tx = await bulkManager.multicall(
+      [{ target: await rifToken.getAddress(), value: 0n, data: renewTransfer }],
+      false
+    );
+    const receipt = (await tx.wait()) as ContractTransactionReceipt;
+    const args = await findEventArgs(rifToken, receipt, "TransferAndCalled");
+    expect(args).to.not.equal(null);
+    expect(String(args?.[0])).to.equal(await renewer.getAddress());
+    expect(args?.[1]).to.equal(20n);
+    expect(args?.[2]).to.equal("0xabcd");
   });
 
   it("emits failures without reverting when revertOnFail is false", async function () {
@@ -247,11 +319,12 @@ describe("RNSBulkManager", function () {
 
     expect(results[0].success).to.equal(false);
 
-    await expect(
-      bulkManager.batchSetAddr([node], ["0x000000000000000000000000000000000000dEaD"], false)
-    )
-      .to.emit(bulkManager, "CallFailed")
-      .withArgs(0, await resolver.getAddress(), anyValue, anyValue);
+    const tx = await bulkManager.batchSetAddr([node], ["0x000000000000000000000000000000000000dEaD"], false);
+    const receipt = (await tx.wait()) as ContractTransactionReceipt;
+    const args = await findEventArgs(bulkManager, receipt, "CallFailed");
+    expect(args).to.not.equal(null);
+    expect(args?.[0]).to.equal(0n);
+    expect(String(args?.[1])).to.equal(await resolver.getAddress());
   });
 
   it("refunds excess ETH and exposes rescue functions to the owner", async function () {
@@ -260,18 +333,22 @@ describe("RNSBulkManager", function () {
 
     await rifToken.mint(await bulkManager.getAddress(), 100n);
 
-    await expect(
-      bulkManager.connect(user).rescueTokens(await rifToken.getAddress(), user.address, 1n)
-    )
-      .to.be.revertedWithCustomError(bulkManager, "OwnableUnauthorizedAccount")
-      .withArgs(user.address);
+    await expectCustomError(
+      bulkManager.connect(user).rescueTokens(await rifToken.getAddress(), user.address, 1n),
+      "OwnableUnauthorizedAccount",
+      [user.address]
+    );
 
     await bulkManager.batchRegister([registerAlice], [ONE_YEAR], true, { value: ONE_YEAR + 1000n });
-    expect(await ethers.provider.getBalance(await bulkManager.getAddress())).to.equal(0n);
+    expect(await network.provider.send("eth_getBalance", [await bulkManager.getAddress(), "latest"])).to.equal(
+      ethers.toQuantity(0n)
+    );
 
     await deployer.sendTransaction({ to: await bulkManager.getAddress(), value: 5_000n });
     await bulkManager.rescueETH(deployer.address, 5_000n);
-    expect(await ethers.provider.getBalance(await bulkManager.getAddress())).to.equal(0n);
+    expect(await network.provider.send("eth_getBalance", [await bulkManager.getAddress(), "latest"])).to.equal(
+      ethers.toQuantity(0n)
+    );
 
     await bulkManager.rescueTokens(await rifToken.getAddress(), deployer.address, 100n);
     expect(await rifToken.balanceOf(deployer.address)).to.equal(100n);

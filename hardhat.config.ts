@@ -1,9 +1,10 @@
 import "dotenv/config";
-import { HardhatUserConfig } from "hardhat/config";
-import "@nomicfoundation/hardhat-ethers";
-import "@nomicfoundation/hardhat-chai-matchers";
+import hardhatEthersPlugin from "@nomicfoundation/hardhat-ethers";
+import { defineConfig } from "hardhat/config";
 
-const config: HardhatUserConfig = {
+
+export default defineConfig({
+  plugins: [hardhatEthersPlugin],
   solidity: {
     version: "0.8.24",
     settings: {
@@ -15,11 +16,10 @@ const config: HardhatUserConfig = {
   },
   networks: {
     rskTestnet: {
+      type: "http",
+      chainType: "l1",
       url: process.env.RSK_TESTNET_RPC || "https://public-node.testnet.rsk.co",
-      chainId: 31,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     }
   }
-};
-
-export default config;
+});
